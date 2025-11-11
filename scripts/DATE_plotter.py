@@ -3,7 +3,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
+from matplotlib import rcParams
 
+plt.rcParams["font.family"] = "DejaVu Sans"
+rcParams.update({
+    "font.size": 15,  # default font size
+    "axes.labelweight": "bold",  # axis labels bold
+})
+
+# plt.rcParams["axes.labelweight"] = "bold"  # axis labels bold
 # =========================
 # Constants / Parameters
 # =========================
@@ -37,11 +45,12 @@ carbon_intensity = 380  # g CO2e/kWh
 
 # replace your four assignments with .loc on the copy (either works once you've .copy()'d)
 k = carbon_intensity * 2.7777777777778e-10
+overcounted_access = 8
 
-filtered_operational_energy_df.loc[:, 'io buffer Dyn Read']   = filtered_operational_energy_df['IO Dyn Read (mJ)']   * k
-filtered_operational_energy_df.loc[:, 'io buffer Dyn Write']   = filtered_operational_energy_df['IO Dyn Write (mJ)']   * k
+filtered_operational_energy_df.loc[:, 'io buffer Dyn Read']   = filtered_operational_energy_df['IO Dyn Read (mJ)']   * k / overcounted_access
+filtered_operational_energy_df.loc[:, 'io buffer Dyn Write']   = filtered_operational_energy_df['IO Dyn Write (mJ)']   * k / overcounted_access
 filtered_operational_energy_df.loc[:, 'io buffer static']      = filtered_operational_energy_df['IO Static (mJ)']      * k
-filtered_operational_energy_df.loc[:, 'weight buffer Dyn Read']= filtered_operational_energy_df['Weight Dyn Read (mJ)']* k
+filtered_operational_energy_df.loc[:, 'weight buffer Dyn Read']= filtered_operational_energy_df['Weight Dyn Read (mJ)']* k / overcounted_access
 filtered_operational_energy_df.loc[:, 'weight buffer static']  = filtered_operational_energy_df['Weight Static (mJ)']  * k
 
 # =========================
@@ -56,6 +65,11 @@ systolic_array_carbon_per_inference = systolic_array_total_energy_kwh * carbon_i
 print(f"Systolic array carbon per inference: {systolic_array_total_energy_kwh:.15f} g CO2e")
 filtered_operational_energy_df.loc[:, 'systolic array'] = systolic_array_carbon_per_inference
 
+filtered_operational_energy_df.loc[:, 'total carbon (g)'] = filtered_operational_energy_df[
+    ['io buffer Dyn Read', 'io buffer Dyn Write', 'io buffer static',
+        'weight buffer Dyn Read', 'weight buffer static',
+        'systolic array']
+    ].sum(axis=1)
 # ---- Assumes you already built filtered_df exactly as in your snippet ----
 # Columns present:
 # 'Weight buffer OPT target', 'Weight buffer Tech',
@@ -79,6 +93,8 @@ operation_component_cols = [
 
 # Order the x-ax[0]is (OPT targets)
 opt_order = ['Area', 'ReadDynamicEnergy', 'ReadEDP']
+opt_order_xtick = ['Area', 'ReadDyn\nEnergy', 'Read\nEDP']
+# opt_order_xtick = ['Area', 'ReadDynamic\nEnergy', 'ReadEDP']
 tech_order = ['HZO5', 'SRAM']
 
 plot_df = (
@@ -93,9 +109,12 @@ operational_plot_df = (
     filtered_operational_energy_df
     .loc[filtered_operational_energy_df['Weight OPT target'].isin(opt_order)
          & filtered_operational_energy_df['Weight Tech'].isin(tech_order),
-         ['Weight OPT target', 'Weight Tech'] + operation_component_cols]
+         ['Weight OPT target', 'Weight Tech'] + operation_component_cols + ['total carbon (g)']]
     .copy()
 )
+print(plot_df)
+print(operational_plot_df)
+
 
 # Categorical ordering
 plot_df['Weight buffer OPT target'] = pd.Categorical(plot_df['Weight buffer OPT target'], categories=opt_order, ordered=True)
@@ -108,15 +127,15 @@ plot_df = plot_df.sort_values(['Weight buffer OPT target', 'Weight buffer Tech']
 operational_plot_df = operational_plot_df.sort_values(['Weight OPT target', 'Weight Tech'])
 
 # Build positions: for each OPT target, we place two bars (HZO5, SRAM-Best)
-x_ticks = opt_order
+x_ticks = opt_order_xtick
 x = np.arange(len(x_ticks))
-bar_width = 0.35
+bar_width = 0.3
 offsets = {
-    'HZO5': -bar_width/2,
-    'SRAM': +bar_width/2,
+    'HZO5': +bar_width/2,
+    'SRAM': -bar_width/2,
 }
 
-fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+fig, ax = plt.subplots(2, 1, figsize=(8, 5))
 
 # To create a consistent color mapping for stacks, just let matplotlib pick default colors.
 # We'll add hatch patterns to distinguish Tech.
@@ -125,9 +144,9 @@ hatch_for_tech = {
     'SRAM': '',
 }
 component_colors = {
-    'io buffer carbon (g)': '#1f77b4',  # blue
-    'weight buffer carbon (g)': '#ff7f0e', # orange
-    'systolic array carbon (g)': '#2ca02c', # green
+    'io buffer carbon (g)': '#3D91BC',  # blue
+    'weight buffer carbon (g)': '#F39C12', # orange
+    'systolic array carbon (g)': '#117A65', # green
 }
 
 # Keep handles to one set of stacks for component legend
@@ -167,7 +186,10 @@ for tech in tech_order:
 # ax[0]es, ticks, labels
 ax[0].set_xticks(x)
 ax[0].set_xticklabels(x_ticks, rotation=0)
-ax[0].set_ylabel('Embodied carbon (g CO₂e)')
+ax[0].tick_params(axis='both', which='major', labelsize=14, labelcolor='black')
+for label in ax[0].get_xticklabels() + ax[0].get_yticklabels():
+    label.set_fontweight("bold")
+ax[0].set_ylabel('Embodied carbon\n(g CO₂e)')
 ax[0].set_ylim(0, 150)
 
 # Legends:
@@ -188,9 +210,9 @@ operation_component_colors = {
     'io buffer Dyn Read':   '#17becf',  # cyan
     'io buffer Dyn Write':  '#bcbd22',  # olive
     'io buffer static':     '#8c564b',  # brown
-    'weight buffer Dyn Read':'#e377c2', # pink
+    'weight buffer Dyn Read':'#7D3C98', # pink
     'weight buffer static': '#7f7f7f',  # gray
-    'systolic array':   '#d62728', 
+    'systolic array':   '#AC403F', 
 }
 # Plot bars
 for tech in tech_order:
@@ -216,36 +238,34 @@ for tech in tech_order:
         base += sub[comp].values * carbon_intensity / 1000
         handles_this_bar.append(h)
 
-    # # Annotate total on top of each bar
-    # totals = base
-    # for xi, total in zip(x + offsets[tech], totals):
-    #     ax[1].text(xi, total + max(totals)*0.01, f"{total:.2f}", ha='center', va='bottom', fontsize=9)
 # ax[1]es, ticks, labels
 ax[1].set_xticks(x)
+ax[1].tick_params(axis='both', which='major', labelsize=14, labelcolor='black')
+for label in ax[1].get_xticklabels() + ax[1].get_yticklabels():
+    label.set_fontweight("bold")
 ax[1].set_xticklabels(x_ticks, rotation=0)
-ax[1].set_ylabel('Operational carbon per inference (g CO₂e)')
+ax[1].set_ylabel('Operational carbon\nper inference\n(g CO₂e)')
 # Legends:
 # leg1_op = ax[1].legend(component_handles_op, component_labels_op, title='Components', loc='upper right', bbox_to_anchor=(0.5, 1.0))
 # leg2_op = ax[1].legend(handles=tech_patches, title='Weight buffer\nTechnology', loc='upper left', bbox_to_anchor=(1.02, 0.6))
 # ax[1].add_artist(leg1_op)  # ensure both legends show
 
 # keep component legend inside subplot
-leg1 = ax[0].legend(component_handles, component_labels, loc='upper right')
+leg1 = ax[0].legend(component_handles, component_labels, loc='upper right', bbox_to_anchor=(2.8, 1.03), fontsize=12, ncol=2)
 ax[0].add_artist(leg1)
 
-leg1_op = ax[1].legend(component_handles_op, component_labels_op, loc='upper right')
+leg1_op = ax[1].legend(component_handles_op, component_labels_op, loc='upper right', bbox_to_anchor=(1.3, 1.5), fontsize=11, ncol=1)
 
 # move tech legend to the top of the figure, centered
 tech_patches = [
-    Patch(facecolor='white', edgecolor='black', hatch='///', label='HZO5'),
-    Patch(facecolor='white', edgecolor='black', label='SRAM')
+    Patch(facecolor='white', edgecolor='black', hatch='///', label='HZO5 FeFET weight buffer'),
+    Patch(facecolor='white', edgecolor='black', label='SRAM weight buffer')
 ]
 fig.legend(handles=tech_patches,
-           loc='upper center', bbox_to_anchor=(0.3, 1.02), ncol=2)
+           loc='upper center', bbox_to_anchor=(0.5, 1.01), ncol=2, fontsize=14)
 
-
-plt.tight_layout()
-fig.text(0.55, 0.005, 'Weight buffer OPT target', ha='center', va='bottom', fontsize=10) 
+plt.tight_layout(rect=[0, 0, 0.7, 0.95], h_pad=0, w_pad=0)
+# fig.text(0.55, 0.005, 'Weight buffer OPT target', ha='center', va='bottom', fontsize=15, weight='bold')
 
 # Save the plot
 output_file = os.path.join(current_dir, 'HZO_analysis_results/embodied_carbon_breakdown_plot.pdf')
