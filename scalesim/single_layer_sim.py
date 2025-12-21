@@ -8,6 +8,8 @@ from scalesim.compute.systolic_compute_ws import systolic_compute_ws
 from scalesim.compute.systolic_compute_is import systolic_compute_is
 from scalesim.memory.double_buffered_scratchpad_mem import double_buffered_scratchpad as mem_dbsp
 
+from scalesim.memory.liveness_estimator import ConvShape, Tile, estimate_live_bytes_conv
+from scalesim.memory.liveness_estimator import choose_unified_io_split
 
 class single_layer_sim:
     def __init__(self):
@@ -102,6 +104,45 @@ class single_layer_sim:
         self.memory_system = mem_sys_obj
         self.memory_system_ready_flag = True
 
+    def _estimate_layer_liveness_bytes(self, act_bytes: int = 1, psum_bytes: int = 4):
+        """
+        Compute (B_I, B_O) for this layer using topo_util and a representative output tile.
+        Returns: (B_I_bytes, B_O_bytes, tile_obj, shape_obj)
+        """
+        # ---- layer params from topo_arrays ----
+        # topo_arrays entry format (conv):
+        # [layer_name,
+        #  IFMAP_h, IFMAP_w, KH, KW, C, OC, stride_h, stride_w, N, M]
+        ifmap_h, ifmap_w = self.topo.get_layer_ifmap_dims(self.layer_id)        # [1:3]
+        KH, KW           = self.topo.get_layer_filter_dims(self.layer_id)       # [3:5]
+        C                = self.topo.get_layer_num_channels(self.layer_id)      # [5]
+        OC               = self.topo.get_layer_num_filters(self.layer_id)       # [6]
+        stride_h, stride_w = self.topo.get_layer_strides(self.layer_id)         # [7:9]
+
+        # ---- ofmap dims (computed hyperparams) ----
+        OH, OW = self.topo.get_layer_ofmap_dims(self.layer_id)
+
+        # Your ConvShape only has a single stride field.
+        # SCALE-Sim stores stride_h and stride_w (but you often force them equal earlier).
+        # Use stride_h here (or assert equal if you want).
+        stride = stride_h
+
+        shape = ConvShape(C=C, OH=OH, OW=OW, OC=OC, KH=KH, KW=KW, stride=stride)
+
+        # ---- choose a tile ----
+        # Option 1 (robust default): base tile on array dims.
+        arr_r, arr_c = self.config.get_array_dims()
+
+        # These are *heuristics*; later you can replace with real mapping tile sizes.
+        T_oh = min(OH, arr_r)
+        T_ow = min(OW, 1)      # common for many mappings to keep OW streaming; safe default
+        T_oc = min(OC, arr_c)
+
+        tile = Tile(T_oh=T_oh, T_ow=T_ow, T_oc=T_oc)
+
+        B_I, B_O = estimate_live_bytes_conv(shape, tile, act_bytes=act_bytes, psum_bytes=psum_bytes)
+        return B_I, B_O, tile, shape
+
     def run(self):
         assert self.params_set_flag, 'Parameters are not set. Run set_params()'
 
@@ -136,6 +177,49 @@ class single_layer_sim:
             ifmap_buf_size_bytes = 1024 * ifmap_buf_size_kb
             filter_buf_size_bytes = 1024 * filter_buf_size_kb
             ofmap_buf_size_bytes = 1024 * ofmap_buf_size_kb
+
+            # ---- liveness-guided split (optional) ----
+            # Treat IFMAP+OFMAP as a unified IO budget and repartition per layer.
+            try:
+                B_I, B_O, tile, shape = self._estimate_layer_liveness_bytes(act_bytes=1, psum_bytes=4)
+
+                unified_io_bytes = ifmap_buf_size_bytes + ofmap_buf_size_bytes
+
+                # SCALE-Sim double-buffered scratchpad uses an "active fraction" for rd/wr buffers.
+                # If you want the split to model *active* capacity, apply active_buf_frac here.
+                active_io_bytes = int(unified_io_bytes * active_buf_frac)
+
+                S_if_active, S_of_active = choose_unified_io_split(
+                    unified_bytes=active_io_bytes,
+                    B_I=B_I,
+                    B_O=B_O,
+                    lambda_psum=1.0,
+                    min_ifmap_frac=0.30
+                )
+
+                # Convert active split back to total configured bytes
+                scale = (1.0 / active_buf_frac) if active_buf_frac > 0 else 1.0
+                ifmap_buf_size_bytes = int(S_if_active * scale)
+                ofmap_buf_size_bytes = int(S_of_active * scale)
+
+                # (Optional) store for reporting
+                self.live_ifmap_bytes = B_I
+                self.live_psum_bytes  = B_O
+                self.chosen_ifmap_bytes = ifmap_buf_size_bytes
+                self.chosen_ofmap_bytes = ofmap_buf_size_bytes
+
+                if self.verbose:
+                    print(
+                        f"[Layer {self.layer_id} {self.topo.get_layer_name(self.layer_id)}] "
+                        f"OHxOW={shape.OH}x{shape.OW}, C={shape.C}, OC={shape.OC}, K={shape.KH}x{shape.KW}, s={shape.stride} | "
+                        f"Tile(oh,ow,oc)=({tile.T_oh},{tile.T_ow},{tile.T_oc}) | "
+                        f"B_I={B_I} B, B_O={B_O} B | "
+                        f"UnifiedIO={unified_io_bytes} B -> IF={ifmap_buf_size_bytes} B, OF={ofmap_buf_size_bytes} B"
+                    )
+            except Exception as e:
+                if self.verbose:
+                    print(f"[Layer {self.layer_id}] Liveness-guided split skipped: {e}")
+
 
             ifmap_backing_bw = 1
             filter_backing_bw = 1
